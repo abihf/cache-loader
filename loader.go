@@ -2,6 +2,7 @@ package loader
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -49,19 +50,17 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 		item.mutex.Lock()
 		defer item.mutex.Unlock()
 
-		if item.expire.Before(time.Now()) && !item.isFetching {
-			item.isFetching = true // so other thread don't fetch
+		// if the item is expired and it's not doing refetch
+		if item.expire.Before(time.Now()) && atomic.CompareAndSwapInt32(&item.isFetching, 0, 1) {
 			go l.refetch(key, item)
 		}
 		return item.value, nil
 	}
 
-	item := &cacheItem{isFetching: true, mutex: sync.Mutex{}}
+	item := &cacheItem{isFetching: 0, mutex: sync.Mutex{}}
 	item.mutex.Lock()
 	defer item.mutex.Unlock()
-	defer func() {
-		item.isFetching = false
-	}()
+
 	l.cache.Add(key, item)
 	l.mutex.Unlock()
 
@@ -76,16 +75,17 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 }
 
 func (l *Loader) refetch(key interface{}, item *cacheItem) {
-	item.isFetching = true // to make sure, lol
-	defer func() {
-		item.isFetching = false
-	}()
+	defer atomic.StoreInt32(&item.isFetching, 0)
 
 	value, err := l.fn(key)
 	if err != nil {
 		l.cache.Remove(key)
 		return
 	}
+
+	item.mutex.Lock()
+	defer item.mutex.Unlock()
+
 	item.value = value
 	item.updateExpire(l.ttl)
 }
@@ -95,7 +95,7 @@ type cacheItem struct {
 	expire time.Time
 
 	mutex      sync.Mutex
-	isFetching bool
+	isFetching int32
 }
 
 func (i *cacheItem) updateExpire(ttl time.Duration) {

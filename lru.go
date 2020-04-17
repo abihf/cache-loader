@@ -23,6 +23,9 @@ func (c *LRUCache) Remove(key interface{}) {
 
 // NewLRU creates Loader with lru based cache
 func NewLRU(fn LoadFunc, ttl time.Duration, size int) *Loader {
-	cache, _ := lru.New(size)
+	cache, err := lru.New(size)
+	if err != nil {
+		panic(err)
+	}
 	return New(fn, ttl, &LRUCache{cache})
 }
