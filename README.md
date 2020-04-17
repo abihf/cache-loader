@@ -1,7 +1,7 @@
 # cache-loader
-![GitHub tag (latest SemVer)](https://img.shields.io/github/v/tag/abihf/cache-loader?label=version)
+[![Release](https://img.shields.io/github/v/tag/abihf/cache-loader?label=version)](https://github.com/abihf/cache-loader/releases)
 [![go.dev reference](https://img.shields.io/badge/go.dev-reference-007d9c?logo=go&logoColor=white)](https://pkg.go.dev/github.com/abihf/cache-loader)
-![Go](https://github.com/abihf/cache-loader/workflows/Go/badge.svg)
+[![Go](https://github.com/abihf/cache-loader/workflows/Go/badge.svg)](https://github.com/abihf/cache-loader/actions?query=branch%3Amaster)
 [![codecov](https://codecov.io/gh/abihf/cache-loader/branch/master/graph/badge.svg)](https://codecov.io/gh/abihf/cache-loader)
 
 Golang Cache Loader
