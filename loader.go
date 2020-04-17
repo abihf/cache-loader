@@ -43,7 +43,7 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 	l.mutex.Lock()
 	cached, ok := l.cache.Get(key)
 	if ok {
-		defer l.mutex.Unlock()
+		l.mutex.Unlock()
 
 		item := cached.(*cacheItem)
 		item.mutex.Lock()
