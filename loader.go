@@ -21,7 +21,9 @@ type Cache interface {
 type Loader struct {
 	fn    LoadFunc
 	cache Cache
-	ttl   time.Duration
+
+	ttl    time.Duration
+	errTtl time.Duration
 
 	mutex sync.Mutex
 }
@@ -29,12 +31,17 @@ type Loader struct {
 // New creates new Loader
 func New(fn LoadFunc, ttl time.Duration, cache Cache) *Loader {
 	return &Loader{
-		fn:    fn,
-		cache: cache,
-		ttl:   ttl,
+		fn:     fn,
+		cache:  cache,
+		ttl:    ttl,
+		errTtl: 10 * time.Second,
 
 		mutex: sync.Mutex{},
 	}
+}
+
+func (l *Loader) SetErrorTTL(ttl time.Duration) {
+	l.errTtl = ttl
 }
 
 // Get the item.
@@ -54,7 +61,7 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 		if item.expire.Before(time.Now()) && atomic.CompareAndSwapInt32(&item.isFetching, 0, 1) {
 			go l.refetch(key, item)
 		}
-		return item.value, nil
+		return item.value, item.err
 	}
 
 	item := &cacheItem{isFetching: 0, mutex: sync.Mutex{}}
@@ -66,7 +73,8 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 
 	value, err := l.fn(key)
 	if err != nil {
-		l.cache.Remove(key)
+		item.err = err
+		item.updateExpire(l.errTtl)
 		return nil, err
 	}
 	item.value = value
@@ -78,20 +86,23 @@ func (l *Loader) refetch(key interface{}, item *cacheItem) {
 	defer atomic.StoreInt32(&item.isFetching, 0)
 
 	value, err := l.fn(key)
-	if err != nil {
-		l.cache.Remove(key)
-		return
-	}
 
 	item.mutex.Lock()
 	defer item.mutex.Unlock()
 
-	item.value = value
-	item.updateExpire(l.ttl)
+	if err != nil {
+		item.err = err
+		item.updateExpire(l.errTtl)
+	} else {
+		item.value = value
+		item.updateExpire(l.ttl)
+	}
+
 }
 
 type cacheItem struct {
 	value  interface{}
+	err    error
 	expire time.Time
 
 	mutex      sync.Mutex
