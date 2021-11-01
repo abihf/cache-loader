@@ -40,6 +40,8 @@ func New(fn LoadFunc, ttl time.Duration, cache Cache) *Loader {
 	}
 }
 
+// SetErrorTTL how long it takes for this Loader to cache error
+// and refetch again
 func (l *Loader) SetErrorTTL(ttl time.Duration) {
 	l.errTtl = ttl
 }
@@ -54,8 +56,8 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 		l.mutex.Unlock()
 
 		item := cached.(*cacheItem)
-		item.mutex.Lock()
-		defer item.mutex.Unlock()
+		item.mutex.RLock()
+		defer item.mutex.RUnlock()
 
 		// if the item is expired and it's not doing refetch
 		if item.expire.Before(time.Now()) && atomic.CompareAndSwapInt32(&item.isFetching, 0, 1) {
@@ -64,7 +66,7 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 		return item.value, item.err
 	}
 
-	item := &cacheItem{isFetching: 0, mutex: sync.Mutex{}}
+	item := &cacheItem{isFetching: 0, mutex: sync.RWMutex{}}
 	item.mutex.Lock()
 	defer item.mutex.Unlock()
 
@@ -105,7 +107,7 @@ type cacheItem struct {
 	err    error
 	expire time.Time
 
-	mutex      sync.Mutex
+	mutex      sync.RWMutex
 	isFetching int32
 }
 
