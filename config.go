@@ -6,13 +6,12 @@ import (
 )
 
 // Fetcher loads the value based on key
-type Fetcher func(ctx context.Context, key interface{}) (interface{}, error)
+type Fetcher[Key, Value any] func(ctx context.Context, key Key) (Value, error)
 
 // ContextFactory creates context to be used by LoadFunc
 type ContextFactory func() context.Context
 
 type config struct {
-	fn     Fetcher
 	cf     ContextFactory
 	driver CacheDriver
 
@@ -21,12 +20,6 @@ type config struct {
 }
 
 type Option func(cfg *config)
-
-func WithFetcher(fetcher Fetcher) Option {
-	return func(cfg *config) {
-		cfg.fn = fetcher
-	}
-}
 
 func WithDriver(driver CacheDriver) Option {
 	return func(cfg *config) {

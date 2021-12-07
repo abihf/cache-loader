@@ -10,10 +10,10 @@ func InMemoryCache() CacheDriver {
 	return &inMemoryCache{}
 }
 
-func (c *inMemoryCache) Add(key, value interface{}) {
+func (c *inMemoryCache) Add(key interface{}, value interface{}) {
 	c.Store(key, value)
 }
 
-func (c *inMemoryCache) Get(key interface{}) (value interface{}, ok bool) {
+func (c *inMemoryCache) Get(key interface{}) (interface{}, bool) {
 	return c.Load(key)
 }

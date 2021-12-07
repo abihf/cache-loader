@@ -12,12 +12,12 @@ type lruWrapper struct {
 }
 
 // Add item to cache
-func (c *lruWrapper) Add(key, value interface{}) {
+func (c *lruWrapper) Add(key interface{}, value interface{}) {
 	c.Cache.Add(key, value)
 }
 
 // NewLRU creates Loader with lru based cache
-func NewLRU(fn Fetcher, ttl time.Duration, size int, options ...Option) *Loader {
+func NewLRU[Key, Value any](fn Fetcher[Key, Value], ttl time.Duration, size int, options ...Option) *Loader[Key, Value] {
 	cache, err := lru.New(size)
 	if err != nil {
 		panic(err)
