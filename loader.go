@@ -114,11 +114,10 @@ func (l *Loader[Key, Value]) refetch(key Key, item *cacheItem[Value]) {
 	item.mutex.Lock()
 	defer item.mutex.Unlock()
 
+	item.value, item.err = value, err
 	if err != nil {
-		item.err = err
 		item.updateExpire(l.errTtl)
 	} else {
-		item.value = value
 		item.updateExpire(l.ttl)
 	}
 }
