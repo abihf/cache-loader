@@ -17,6 +17,11 @@ type Cache interface {
 	Remove(key interface{})
 }
 
+type keyLock struct {
+	ref int
+	sync.Mutex
+}
+
 // Loader manage items in cache and fetch them if not exist
 type Loader struct {
 	fn    LoadFunc
@@ -25,7 +30,8 @@ type Loader struct {
 	ttl    time.Duration
 	errTtl time.Duration
 
-	mutex sync.Mutex
+	m  sync.Mutex
+	kl map[interface{}]*keyLock
 }
 
 // New creates new Loader
@@ -36,7 +42,7 @@ func New(fn LoadFunc, ttl time.Duration, cache Cache) *Loader {
 		ttl:    ttl,
 		errTtl: 10 * time.Second,
 
-		mutex: sync.Mutex{},
+		kl: map[interface{}]*keyLock{},
 	}
 }
 
@@ -46,32 +52,65 @@ func (l *Loader) SetErrorTTL(ttl time.Duration) {
 	l.errTtl = ttl
 }
 
+func (l *Loader) lockKey(key interface{}) {
+	l.m.Lock()
+	defer l.m.Unlock()
+
+	locker, ok := l.kl[key]
+	if !ok {
+		locker = &keyLock{}
+		l.kl[key] = locker
+	}
+	locker.ref++
+	locker.Lock()
+}
+
+func (l *Loader) unlockKey(key interface{}) {
+	l.m.Lock()
+	defer l.m.Unlock()
+
+	locker := l.kl[key]
+	locker.ref--
+	if locker.ref <= 0 {
+		delete(l.kl, key)
+	}
+	locker.Unlock()
+}
+
 // Get the item.
 // If it doesn't exist on cache, Loader will call LoadFunc once even when other go routine access the same key.
 // If the item is expired, it will return old value while loading new one.
 func (l *Loader) Get(key interface{}) (interface{}, error) {
-	l.mutex.Lock()
+	l.lockKey(key)
+	var unlocked int32
+	unlock := func() {
+		if atomic.CompareAndSwapInt32(&unlocked, 0, 1) {
+			l.unlockKey(key)
+		}
+	}
+	defer unlock()
+
 	cached, ok := l.cache.Get(key)
 	if ok {
-		l.mutex.Unlock()
+		unlock()
 
 		item := cached.(*cacheItem)
-		item.mutex.RLock()
-		defer item.mutex.RUnlock()
+		item.vm.RLock()
+		defer item.vm.RUnlock()
 
 		// if the item is expired and it's not doing refetch
-		if item.expire.Before(time.Now()) && atomic.CompareAndSwapInt32(&item.isFetching, 0, 1) {
+		if item.shouldRefetch() {
 			go l.refetch(key, item)
 		}
 		return item.value, item.err
 	}
 
-	item := &cacheItem{isFetching: 0, mutex: sync.RWMutex{}}
-	item.mutex.Lock()
-	defer item.mutex.Unlock()
+	item := &cacheItem{}
+	item.vm.Lock()
+	defer item.vm.Unlock()
 
 	l.cache.Add(key, item)
-	l.mutex.Unlock()
+	unlock()
 
 	value, err := l.fn(key)
 	if err != nil {
@@ -85,12 +124,16 @@ func (l *Loader) Get(key interface{}) (interface{}, error) {
 }
 
 func (l *Loader) refetch(key interface{}, item *cacheItem) {
-	defer atomic.StoreInt32(&item.isFetching, 0)
+	defer func() {
+		item.rm.Lock()
+		defer item.rm.Unlock()
+		item.isFetching = false
+	}()
 
 	value, err := l.fn(key)
 
-	item.mutex.Lock()
-	defer item.mutex.Unlock()
+	item.vm.Lock()
+	defer item.vm.Unlock()
 
 	item.value, item.err = value, err
 	if err != nil {
@@ -98,19 +141,29 @@ func (l *Loader) refetch(key interface{}, item *cacheItem) {
 	} else {
 		item.updateExpire(l.ttl)
 	}
-
 }
 
 type cacheItem struct {
-	value  interface{}
-	err    error
-	expire time.Time
+	value      interface{}
+	err        error
+	expire     time.Time
+	isFetching bool
 
-	mutex      sync.RWMutex
-	isFetching int32
+	vm sync.RWMutex
+	rm sync.Mutex
+}
+
+func (i *cacheItem) shouldRefetch() bool {
+	i.rm.Lock()
+	defer i.rm.Unlock()
+
+	if !i.isFetching && i.expire.Before(time.Now()) {
+		i.isFetching = true
+		return true
+	}
+	return false
 }
 
 func (i *cacheItem) updateExpire(ttl time.Duration) {
-	newExpire := time.Now().Add(ttl)
-	i.expire = newExpire
+	i.expire = time.Now().Add(ttl)
 }
