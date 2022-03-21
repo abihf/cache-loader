@@ -46,6 +46,8 @@ func (l *InMemoryKeyLocker[Key]) Lock(key Key) func() {
 		}
 		item.m.Unlock()
 		if atomic.AddInt32(&item.ref, -1) <= 0 {
+			l.root.Lock()
+			defer l.root.Unlock()
 			delete(l.locks, key)
 		}
 		unlocked = true
