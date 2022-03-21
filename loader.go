@@ -1,139 +1,105 @@
 package loader
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// LoadFunc loads the value based on key
-type LoadFunc func(key interface{}) (interface{}, error)
-
-// Cache stores the items
+// CacheDriver stores the items
 // you can use ARCCache or TwoQueueCache from github.com/hashicorp/golang-lru
-type Cache interface {
-	Add(key, value interface{})
-	Get(key interface{}) (value interface{}, ok bool)
-	Remove(key interface{})
+type CacheDriver interface {
+	Add(key interface{}, value interface{})
+	Get(key interface{}) (interface{}, bool)
 }
 
-type keyLock struct {
-	ref int
-	sync.Mutex
-}
+// Fetcher loads the value based on key
+type Fetcher[Key comparable, Value any] func(ctx context.Context, key Key) (Value, error)
 
 // Loader manage items in cache and fetch them if not exist
-type Loader struct {
-	fn    LoadFunc
-	cache Cache
+type Loader[Key comparable, Value any] struct {
+	*config
+	fn  Fetcher[Key, Value]
+	def Value
 
-	ttl    time.Duration
-	errTtl time.Duration
-
-	m  sync.Mutex
-	kl map[interface{}]*keyLock
+	lock KeyLocker[Key]
 }
 
 // New creates new Loader
-func New(fn LoadFunc, ttl time.Duration, cache Cache) *Loader {
-	return &Loader{
-		fn:     fn,
-		cache:  cache,
+func New[Key comparable, Value any](fn Fetcher[Key, Value], ttl time.Duration, options ...Option) *Loader[Key, Value] {
+	cfg := &config{
 		ttl:    ttl,
-		errTtl: 10 * time.Second,
-
-		kl: map[interface{}]*keyLock{},
+		errTtl: ttl,
+		driver: &inMemoryCache{},
+		cf:     defaultContextFactory,
+	}
+	for _, o := range options {
+		o(cfg)
+	}
+	return &Loader[Key, Value]{
+		config: cfg,
+		fn:     fn,
+		lock:   newInMemoryKeyLocker[Key](), // TODO: make it configurable
 	}
 }
 
-// SetErrorTTL how long it takes for this Loader to cache error
-// and refetch again
-func (l *Loader) SetErrorTTL(ttl time.Duration) {
-	l.errTtl = ttl
-}
-
-func (l *Loader) lockKey(key interface{}) {
-	l.m.Lock()
-	defer l.m.Unlock()
-
-	locker, ok := l.kl[key]
-	if !ok {
-		locker = &keyLock{}
-		l.kl[key] = locker
-	}
-	locker.ref++
-	locker.Lock()
-}
-
-func (l *Loader) unlockKey(key interface{}) {
-	l.m.Lock()
-	defer l.m.Unlock()
-
-	locker := l.kl[key]
-	locker.ref--
-	if locker.ref <= 0 {
-		delete(l.kl, key)
-	}
-	locker.Unlock()
-}
-
-// Get the item.
+// Load the item.
 // If it doesn't exist on cache, Loader will call LoadFunc once even when other go routine access the same key.
 // If the item is expired, it will return old value while loading new one.
-func (l *Loader) Get(key interface{}) (interface{}, error) {
-	l.lockKey(key)
-	var unlocked int32
-	unlock := func() {
-		if atomic.CompareAndSwapInt32(&unlocked, 0, 1) {
-			l.unlockKey(key)
-		}
-	}
+func (l *Loader[Key, Value]) Load(key Key) (Value, error) {
+	unlock := l.lock.Lock(key)
 	defer unlock()
 
-	cached, ok := l.cache.Get(key)
+	iface, ok := l.driver.Get(key)
 	if ok {
 		unlock()
 
-		item := cached.(*cacheItem)
-		item.vm.RLock()
-		defer item.vm.RUnlock()
+		if iface == nil {
+			return l.def, fmt.Errorf("cache driver returns ok but the value is nil")
+		}
+
+		item, ok := iface.(*cacheItem[Value])
+		if !ok {
+			return l.def, fmt.Errorf("cache driver returns invalid value %v", iface)
+		}
+
+		item.mutex.RLock()
+		defer item.mutex.RUnlock()
 
 		// if the item is expired and it's not doing refetch
-		if item.shouldRefetch() {
+		if item.expire.Before(time.Now()) && atomic.CompareAndSwapInt32(&item.isFetching, 0, 1) {
 			go l.refetch(key, item)
 		}
 		return item.value, item.err
 	}
 
-	item := &cacheItem{}
-	item.vm.Lock()
-	defer item.vm.Unlock()
+	item := &cacheItem[Value]{isFetching: 0}
+	item.mutex.Lock()
+	defer item.mutex.Unlock()
 
-	l.cache.Add(key, item)
+	l.driver.Add(key, item)
 	unlock()
 
-	value, err := l.fn(key)
+	value, err := l.fn(l.cf(), key)
 	if err != nil {
 		item.err = err
 		item.updateExpire(l.errTtl)
-		return nil, err
+		return l.def, err
 	}
 	item.value = value
 	item.updateExpire(l.ttl)
 	return value, nil
 }
 
-func (l *Loader) refetch(key interface{}, item *cacheItem) {
-	defer func() {
-		item.rm.Lock()
-		defer item.rm.Unlock()
-		item.isFetching = false
-	}()
+func (l *Loader[Key, Value]) refetch(key Key, item *cacheItem[Value]) {
+	defer atomic.StoreInt32(&item.isFetching, 0)
 
-	value, err := l.fn(key)
+	value, err := l.fn(l.cf(), key)
 
-	item.vm.Lock()
-	defer item.vm.Unlock()
+	item.mutex.Lock()
+	defer item.mutex.Unlock()
 
 	item.value, item.err = value, err
 	if err != nil {
@@ -143,27 +109,16 @@ func (l *Loader) refetch(key interface{}, item *cacheItem) {
 	}
 }
 
-type cacheItem struct {
-	value      interface{}
-	err        error
-	expire     time.Time
-	isFetching bool
+type cacheItem[Value any] struct {
+	value  Value
+	err    error
+	expire time.Time
 
-	vm sync.RWMutex
-	rm sync.Mutex
+	mutex      sync.RWMutex
+	isFetching int32
 }
 
-func (i *cacheItem) shouldRefetch() bool {
-	i.rm.Lock()
-	defer i.rm.Unlock()
-
-	if !i.isFetching && i.expire.Before(time.Now()) {
-		i.isFetching = true
-		return true
-	}
-	return false
-}
-
-func (i *cacheItem) updateExpire(ttl time.Duration) {
-	i.expire = time.Now().Add(ttl)
+func (i *cacheItem[Value]) updateExpire(ttl time.Duration) {
+	newExpire := time.Now().Add(ttl)
+	i.expire = newExpire
 }
