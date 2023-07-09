@@ -2,7 +2,6 @@ package loader
 
 import (
 	"sync"
-	"sync/atomic"
 )
 
 type KeyLocker[Key comparable] interface {
@@ -27,6 +26,22 @@ type inMemoryKeyLockerItem struct {
 
 // Lock implements KeyLocker
 func (l *InMemoryKeyLocker[Key]) Lock(key Key) func() {
+	item := l.getItem(key)
+	item.m.Lock()
+
+	unlocked := false
+	return func() {
+		if unlocked {
+			return
+		}
+		item.m.Unlock()
+		l.releaseItem(key)
+
+		unlocked = true
+	}
+}
+
+func (l *InMemoryKeyLocker[Key]) getItem(key Key) *inMemoryKeyLockerItem {
 	l.root.Lock()
 	defer l.root.Unlock()
 
@@ -36,21 +51,22 @@ func (l *InMemoryKeyLocker[Key]) Lock(key Key) func() {
 		l.locks[key] = item
 	}
 
-	atomic.AddInt32(&item.ref, 1)
-	item.m.Lock()
+	item.ref += 1
+	return item
+}
 
-	unlocked := false
-	return func() {
-		if unlocked {
-			return
-		}
-		item.m.Unlock()
-		if atomic.AddInt32(&item.ref, -1) <= 0 {
-			l.root.Lock()
-			defer l.root.Unlock()
-			delete(l.locks, key)
-		}
-		unlocked = true
+func (l *InMemoryKeyLocker[Key]) releaseItem(key Key) {
+	l.root.Lock()
+	defer l.root.Unlock()
+
+	item, ok := l.locks[key]
+	if !ok {
+		return
+	}
+
+	item.ref -= 1
+	if item.ref <= 0 {
+		delete(l.locks, key)
 	}
 }
 
