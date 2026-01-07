@@ -38,7 +38,7 @@ func WithARC(size int) Option {
 	return WithDriver(cache)
 }
 
-// NewLRU creates Loader with lru based cache
+// NewLRU is deprecated, use New with WithLRU option instead
 func NewLRU[Key comparable, Value any](fn Fetcher[Key, Value], ttl time.Duration, size int, options ...Option) *Loader[Key, Value] {
 	options = append(options, WithLRU(size))
 	return New(fn, ttl, options...)
