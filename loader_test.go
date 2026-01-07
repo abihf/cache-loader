@@ -32,7 +32,7 @@ func TestConcurrencySingleKey(t *testing.T) {
 		go func() {
 			start := time.Now()
 			val, _ := l.Load("x")
-			c <- &result{val: val, dur: time.Now().Sub(start)}
+			c <- &result{val: val, dur: time.Since(start)}
 		}()
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -41,12 +41,12 @@ func TestConcurrencySingleKey(t *testing.T) {
 		assert.InDelta(t, 100, res.dur.Milliseconds(), 25, "each get should within 1s")
 		assert.Equal(t, "x", res.val, "Value must be x")
 	}
-	dur = time.Now().Sub(start)
+	dur = time.Since(start)
 	assert.InDelta(t, 100, dur.Milliseconds(), 25, "all get should within 1s")
 
 	start = time.Now()
 	val, _ := l.Load("x")
-	dur = time.Now().Sub(start)
+	dur = time.Since(start)
 	assert.Less(t, dur.Milliseconds(), int64(50), "After cached get must be fast")
 	assert.Equal(t, "x", val, "Value must still be x")
 
@@ -75,7 +75,7 @@ func TestConcurrencyMultiKey(t *testing.T) {
 		go func(i int) {
 			start := time.Now()
 			val, _ := l.Load(i)
-			c <- &result{val: val, dur: time.Now().Sub(start)}
+			c <- &result{val: val, dur: time.Since(start)}
 		}(i)
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -84,12 +84,12 @@ func TestConcurrencyMultiKey(t *testing.T) {
 		assert.InDelta(t, 100, res.dur.Milliseconds(), 25, "each get should within 1s")
 		assert.Equal(t, fmt.Sprint(i), res.val, "Value must be valid")
 	}
-	dur = time.Now().Sub(start)
+	dur = time.Since(start)
 	assert.InDelta(t, 100, dur.Milliseconds(), 25, "all get should within 1s")
 
 	start = time.Now()
 	val, _ := l.Load(1)
-	dur = time.Now().Sub(start)
+	dur = time.Since(start)
 	assert.Less(t, dur.Milliseconds(), int64(50), "After cached get must be fast")
 	assert.Equal(t, "1", val, "Value must still the same")
 
