@@ -60,14 +60,16 @@ func (l *Loader[Key, Value]) fastLoad(key Key) (Value, error, bool) {
 	}
 
 	item.mutex.RLock()
-	defer item.mutex.RUnlock()
 
 	// if the item is expired and it's not doing refetch
 	if item.expire.Before(time.Now()) && item.isFetching.CompareAndSwap(false, true) {
 		go l.refetch(key, item)
 	}
 
-	return item.value, item.err, true
+	value, err := item.value, item.err
+	item.mutex.RUnlock()
+
+	return value, err, true
 }
 
 // Load the item.
@@ -85,6 +87,7 @@ func (l *Loader[Key, Value]) Load(key Key) (Value, error) {
 	// double check after get the lock
 	v, err, ok = l.fastLoad(key)
 	if ok {
+		unlock()
 		return v, err
 	}
 

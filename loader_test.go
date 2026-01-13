@@ -3,6 +3,7 @@ package loader
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,4 +119,85 @@ func TestExpire(t *testing.T) {
 	val, _ = l.Load("x")
 	assert.Equal(t, "2 x", val, "Use updated value")
 	assert.Equal(t, int32(2), counter, "fetch called twice")
+}
+
+func TestDoubleCheckLockLeak(t *testing.T) {
+	// 1. Setup with LRU size 1 to allow easy eviction
+	// We use a latch to coordinate the race exactly.
+	fetchLatch := make(chan struct{})
+
+	fetch := func(ctx context.Context, key string) (string, error) {
+		// Wait for signal to complete fetch
+		// This allows us to keep T1 holding the lock while T2 blocks
+		if key == "race_key" {
+			select {
+			case <-fetchLatch:
+			case <-time.After(1 * time.Second):
+			}
+		}
+		return "value", nil
+	}
+
+	// Create loader with LRU size 1
+	// Note: We need to use WithLRU.
+	// But WithLRU creates a driver. We need to make sure we are testing the Loader logic.
+	l := New(fetch, 1*time.Hour, WithLRU(1))
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// 2. Trigger the Race
+
+	// T1: The "Filler"
+	go func() {
+		defer wg.Done()
+		l.Load("race_key")
+	}()
+
+	// T2: The "Victim"
+	go func() {
+		defer wg.Done()
+		// Wait a tiny bit to ensure T1 started and acquired the lock
+		time.Sleep(10 * time.Millisecond)
+
+		// This should block on T1's lock.
+		// When T1 finishes (signal sent below), T1 puts item in cache and unlocks.
+		// T2 wakes up, gets lock, sees item in cache (double check), and returns.
+		// BUG: T2 does not unlock.
+		l.Load("race_key")
+	}()
+
+	// Allow T1 to proceed and finish
+	time.Sleep(50 * time.Millisecond)
+	close(fetchLatch)
+
+	wg.Wait()
+
+	// At this point, "race_key" is in cache.
+	// If bug exists, "race_key" lock is held by T2 (leaked).
+
+	// 3. Verify
+	// We must force `Load` to try locking again.
+	// Currently `fastLoad` returns true because item is in cache.
+	// We must Evict "race_key".
+	// Since LRU size is 1, loading "other_key" should evict "race_key".
+	l.Load("other_key")
+
+	// Now "race_key" should be gone from driver.
+	// Verify it's gone (optional, implicit in next step)
+
+	done := make(chan struct{})
+	go func() {
+		// This should fail fastLoad (not in cache), and try to acquire Lock.
+		// If leaked, it hangs.
+		l.Load("race_key")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success! Lock was available.
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Deadlock: failed to acquire lock after eviction. Lock leak confirmed.")
+	}
 }
